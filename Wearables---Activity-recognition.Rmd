@@ -1,0 +1,176 @@
+---
+title: "Wearables - Activity-recognition"
+output: 
+  html_document: 
+    keep_md: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Synopsis
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These types of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks.
+
+One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, our goal will be to use data from accelerometers on the belt, forearm, arm, and dumbbell of 6 participants, to predict the manner in which they did their exercises.
+
+# Data preparation 
+
+Let's start by loading the libraries and datasets we'll use throughout the project.
+
+```{r, message=FALSE,warning=FALSE}
+## Load libraries
+
+library(tidyverse)
+library(caret)
+library(skimr)
+
+## Check if raw data files exist in the working directory, otherwise, download them.
+
+if(!file.exists("pml-testing.csv")){
+  download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv","pml-testing.csv")
+}
+
+
+if(!file.exists("pml-training.csv")){
+  download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv","pml-training.csv")  
+}
+
+## Read cvs files into R
+
+pml_test_cases_to_predict <- read_csv("pml-testing.csv",
+                                       col_types = cols(.default=col_double(),
+                                                        X1 = col_skip(), ## first col contains row id, not necessary
+                                                        user_name=col_factor(),
+                                                        new_window=col_factor(),
+                                                        cvtd_timestamp = col_datetime(format = "%d/%m/%Y %H:%M")),
+                                       na = c(NA,"#DIV/0!"))
+
+
+
+pml_training <- read_csv("pml-training.csv", 
+                         col_types = cols(.default=col_double(),
+                                          X1 = col_skip(), ## first col contains row id, not necessary
+                                          user_name=col_factor(),
+                                          new_window=col_factor(),
+                                          cvtd_timestamp = col_datetime(format = "%d/%m/%Y %H:%M"),
+                                          classe=col_factor()),
+                         na = c(NA,"#DIV/0!"))
+
+```
+
+Now that our data is loaded, let's take a few summary statistics of the pml_training set, to see if there's any variable coded with a wrong data type and/or any missing data.
+
+```{r}
+
+skim(pml_training)
+
+```
+
+As we can see, there are many predictors with more than 95% of their values missing. Such a low complete rate makes those variables not suitable for our model, and therefore I'll drop them from the dataset. Thus, I'll drop all variables with more than 50% of their data missing and check afterwards if there's still any missing value on the data frame, for imputing in later pre-process activities.
+
+```{r}
+## Remove columns with more than 50% of their data missing
+
+pml_training <- pml_training[,-which(colMeans(is.na(pml_training)) > 0.5)]
+
+
+## Check if there's still any missing value on the data frame for imputing later 
+
+anyNA(pml_training)
+```
+
+
+# Model building
+
+It's important to say a few words before we start building the model, that will allow the reader to understand better the decisions made throughout this point:
+
+* Objective: the activity focus on maximizing prediction accuracy, rather than model explanatory capabilities, which are not considered to be important.
+
+* Type of problem: the activity requires us to predict the "classe" variable and thus we are in front of a classification problem. 
+
+* Dataset: The dataset consists mainly of numerical variable, but it also has a few categorical variables (e.g. user_name, new_window)
+
+These three things combined made me lean towards a model capable of handling numerical and categorical values, that outputs classes and with a high degree of accuracy. Thus, my first election was the ensemble model known as Random Forest.
+
+Having said that, let's see how such a model performs on the given data. But first, let's start by splitting our data into a testing and training dataset.
+
+```{r,warning=FALSE}
+
+## Create train and test set
+
+set.seed(1234)
+
+in_train <- createDataPartition(y=pml_training$classe,p=0.7,list=FALSE)
+
+pml_train <- pml_training[in_train,]
+
+pml_test <- pml_training[-in_train,]
+
+dim(pml_train)
+
+dim(pml_test)
+```
+
+Let's also recall that random decision forests correct for decision trees habit of overfitting to their training set. Even further, I'll be using 10-fold cross validation as a way to assess how the training results will generalize to an independent dataset and also to ensure that the model doesn't overfit while tuning the model's parameters. Additionally, the "pml_test" dataset that we define in the previous step will be used as a hold back validation set for back testing.
+
+Finally, for tuning the model, I'll make use of caret's grid search method for evaluating different parameters. In this case, the random forest algorithm I'll use -rf- has only one tuning parameter "mtry", that is the number of randomly selected predictors at each split time. Thus, I'll be testing that parameter with the sequence of numbers from 5 to 55, increasing by 5.
+
+
+```{r}
+
+## Tuning parameters: mtry, that means the Randomly Selected Predictors
+set.seed(1234) 
+
+fitControl <- trainControl(method = "cv", number = 10)
+
+rf_tune_grid <- expand.grid(mtry = seq(5,55,by = 5))
+
+rf_model = train(classe ~ .,data = pml_train,
+                  trControl = fitControl,
+                  tuneGrid = rf_tune_grid,
+                  method = "rf",
+                  metric = "Accuracy")
+
+```
+
+
+Let's take a look to the fitted model:
+
+```{r}
+print(rf_model)
+plot(rf_model)
+```
+
+As we can see, the final model was tuned with an mtry of `r as.numeric(rf_model$bestTune)` were the averaged accuracies between folds have been maximized. Bigger mtry values tend to diminish accuracy over test folds, as the algorithm tends to overfit the training data, and lower mtry aren't capable of explaining the data variability. 
+
+The final model is shown here-under:
+
+```{r}
+
+rf_model$finalModel
+
+```
+
+
+The partitions used in cross-validation helped to simulate an independent data set and get a better assessment of the model’s predictive performance. Let's back test this last assumptions by looking how well the model performs on the pml_test dataset that I've kept apart at the beginning.
+
+```{r}
+
+pml_test$predictions <- predict(rf_model,newdata = pml_test)
+
+conf_matrix <- confusionMatrix(pml_test$classe,pml_test$predictions)
+
+print(conf_matrix)
+```
+
+As we can see, accuracy on an independent test set is very similar to the overall accuracy given by the 10-fold cross validation when training the model.
+
+Finally, let's use this model to predict the "classe" variable on 20 different test cases:
+
+```{r}
+pml_test_cases_to_predict$predictions <- predict(rf_model,newdata = pml_test_cases_to_predict)
+
+pml_test_cases_to_predict[,"predictions"]
+```
